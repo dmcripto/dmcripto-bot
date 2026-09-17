@@ -33,25 +33,93 @@ def send_telegram_message(chat_id, text, reply_to_message_id=None):
         return None
 
 
+LONG_KEYWORDS = ('long', 'compra', 'buy', 'alcista')
+SHORT_KEYWORDS = ('short', 'venta', 'sell', 'bajista')
+
+
+def normalize_side_from_value(value):
+    if not value:
+        return None
+    value = str(value).strip().lower()
+    if value in LONG_KEYWORDS:
+        return 'LONG'
+    if value in SHORT_KEYWORDS:
+        return 'SHORT'
+    return None
+
+
+def detect_side_from_text(text):
+    text = (text or '').lower()
+    has_long = any(k in text for k in LONG_KEYWORDS)
+    has_short = any(k in text for k in SHORT_KEYWORDS)
+    if has_long and not has_short:
+        return 'LONG'
+    if has_short and not has_long:
+        return 'SHORT'
+    return None
+
+
+def build_signal_body(data, raw_text):
+    """Construye el cuerpo del mensaje a partir del JSON (si lo hay) o del texto plano."""
+    if data:
+        message = data.get('message')
+        if message:
+            return str(message)
+        lines = []
+        symbol = data.get('symbol') or data.get('ticker')
+        price = data.get('price') or data.get('close')
+        time_ = data.get('time')
+        if symbol:
+            lines.append(f"Símbolo: {symbol}")
+        if price:
+            lines.append(f"Precio: {price}")
+        if time_:
+            lines.append(f"Hora: {time_}")
+        if lines:
+            return "\n".join(lines)
+        return str(data)
+    return raw_text.strip()
+
+
 # ==========================================
 # 1. WEBHOOK PARA TRADINGVIEW (Señales)
 # ==========================================
+# El plan gratuito de TradingView permite alertas por webhook, pero el cuerpo
+# puede llegar como texto plano (no siempre JSON) y no admite cabeceras
+# personalizadas, así que el secreto se valida por query string (?token=...).
 @app.route('/webhook', methods=['POST'])
 def tv_webhook():
-    data = request.get_json(silent=True)
-    if not data:
+    raw_body = request.get_data(as_text=True) or ""
+    data = request.get_json(silent=True, force=True)
+
+    if TV_WEBHOOK_SECRET:
+        token = request.args.get('token') or (data.get('secret') if data else None)
+        if token != TV_WEBHOOK_SECRET:
+            logging.warning("Webhook de TradingView rechazado: secreto inválido")
+            return "Unauthorized", 401
+
+    if not data and not raw_body.strip():
         return "No data", 400
 
-    # Si se configuró TV_WEBHOOK_SECRET, la alerta debe incluir el mismo valor en "secret"
-    if TV_WEBHOOK_SECRET and data.get('secret') != TV_WEBHOOK_SECRET:
-        logging.warning("Webhook de TradingView rechazado: secreto inválido")
-        return "Unauthorized", 401
+    # Detectar LONG/SHORT: primero por un campo explícito (action/side/signal),
+    # y si no existe, buscando palabras clave en el texto de la alerta.
+    side = normalize_side_from_value(
+        data.get('action') or data.get('side') or data.get('signal')
+    ) if data else None
 
-    # TradingView enviará el mensaje en la clave "message"
-    message = data.get('message', str(data))
+    body = build_signal_body(data, raw_body)
 
-    # Formatear mensaje para Telegram
-    tg_message = f"🚨 *ALERTA DMCRIPTO*\n\n{message}"
+    if side is None:
+        side = detect_side_from_text(body)
+
+    if side == 'LONG':
+        header = "🟢🚀 *SEÑAL LONG (COMPRA)* - DMCRIPTO"
+    elif side == 'SHORT':
+        header = "🔴🔻 *SEÑAL SHORT (VENTA)* - DMCRIPTO"
+    else:
+        header = "🚨 *ALERTA DMCRIPTO*"
+
+    tg_message = f"{header}\n\n{body}"
 
     response = send_telegram_message(CHAT_ID, tg_message)
     if response is not None and response.status_code == 200:

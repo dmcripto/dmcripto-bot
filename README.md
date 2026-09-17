@@ -41,26 +41,82 @@ despliegue, p. ej. Railway) y rellena:
    Esto registra `https://TU_DOMINIO/tg_webhook` en Telegram (incluyendo el
    `TG_WEBHOOK_SECRET` si lo configuraste).
 
-## Configurar la alerta en TradingView
+## Configurar alertas en TradingView (plan gratuito/Basic)
 
-En el mensaje de la alerta de TradingView, usa un JSON como este:
+El plan **gratuito** de TradingView sí permite activar el webhook en las
+alertas (opción "Webhook URL" en la pestaña *Notifications* del diálogo de
+alerta). Las únicas limitaciones del plan gratuito son:
 
+- No admite cabeceras HTTP personalizadas → por eso el secreto se valida
+  mediante un parámetro en la propia URL (`?token=...`), no por header.
+- No permite alertas "dinámicas" con `alert()` dentro del script (eso sí
+  requiere un plan de pago). La solución es crear **una alerta por
+  condición**: una para LONG y otra para SHORT, cada una con su propio
+  mensaje estático (usando los placeholders de TradingView como
+  `{{ticker}}`, `{{close}}`, `{{time}}`).
+
+El bot detecta automáticamente si la señal es LONG o SHORT y la resalta en
+Telegram (🟢 verde para LONG, 🔴 rojo para SHORT), de dos formas posibles:
+
+1. Buscando un campo `action` / `side` / `signal` en el JSON (valores
+   admitidos: `long`, `buy`, `compra`, `short`, `sell`, `venta`, etc.).
+2. Si el mensaje es texto plano, buscando esas mismas palabras clave en el
+   propio texto.
+
+### 1. URL del webhook
+
+En la pestaña *Notifications* de cada alerta, marca **"Webhook URL"** y pon:
+
+```
+https://TU_DOMINIO/webhook?token=TU_TV_WEBHOOK_SECRET
+```
+
+(si no configuraste `TV_WEBHOOK_SECRET`, usa simplemente
+`https://TU_DOMINIO/webhook`, aunque no se recomienda para producción, ya que
+cualquiera que conozca la URL podría enviar mensajes falsos al canal).
+
+### 2. Alerta para LONG
+
+En el campo "Message" de la alerta, cualquiera de estas dos opciones funciona:
+
+Texto plano (más simple, sin necesidad de JSON):
+```
+🟢 LONG {{ticker}} | Entrada: {{close}} | {{interval}} | {{time}}
+```
+
+O en formato JSON (más estructurado):
 ```json
 {
-  "message": "Señal LONG en BTCUSDT - Order Block + ADX confirmado",
-  "secret": "EL_MISMO_VALOR_QUE_TV_WEBHOOK_SECRET"
+  "action": "LONG",
+  "symbol": "{{ticker}}",
+  "price": "{{close}}",
+  "time": "{{time}}"
 }
 ```
 
-Y en la configuración del webhook de la alerta, apunta a:
+### 3. Alerta para SHORT
 
+Crea una segunda alerta con la condición contraria (o el mismo script
+señalando la entrada corta) y usa:
+
+Texto plano:
 ```
-https://TU_DOMINIO/webhook
+🔴 SHORT {{ticker}} | Entrada: {{close}} | {{interval}} | {{time}}
 ```
 
-Si no configuras `TV_WEBHOOK_SECRET`, el campo `secret` no es necesario, pero
-cualquiera que conozca la URL podría enviar mensajes falsos al canal — se
-recomienda encarecidamente configurarlo en producción.
+O JSON:
+```json
+{
+  "action": "SHORT",
+  "symbol": "{{ticker}}",
+  "price": "{{close}}",
+  "time": "{{time}}"
+}
+```
+
+> Nota: si usas el JSON, no hace falta incluir `"secret"` dentro del cuerpo
+> porque la validación ya se hace con `?token=` en la URL; se sigue
+> aceptando por compatibilidad si prefieres ponerlo ahí en vez de en la URL.
 
 ## Desarrollo local
 
@@ -73,7 +129,13 @@ python main.py
 Para probar el webhook de TradingView localmente:
 
 ```bash
-curl -X POST http://localhost:8080/webhook \
+# JSON con acción explícita
+curl -X POST "http://localhost:8080/webhook?token=$TV_WEBHOOK_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"message": "Prueba de señal"}'
+  -d '{"action": "LONG", "symbol": "BTCUSDT", "price": "65000"}'
+
+# Texto plano (como lo envía TradingView cuando el mensaje no es JSON válido)
+curl -X POST "http://localhost:8080/webhook?token=$TV_WEBHOOK_SECRET" \
+  -H "Content-Type: text/plain" \
+  --data-raw "SHORT BTCUSDT entrada 64000"
 ```
